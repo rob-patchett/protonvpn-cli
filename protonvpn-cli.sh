@@ -388,7 +388,7 @@ function openvpn_connect() {
     sleep 5
     new_ip="$(check_ip)"
     if [[ ("$current_ip" != "$new_ip") && ("$new_ip" != "Error.") ]]; then
-      modify_dns to_protonvpn_dns # Use protonvpn DNS server.
+      modify_dns to_protonvpn_dns # Use ProtonVPN DNS server.
       echo "[$] Connected!"
       echo "[#] New IP: $new_ip"
       exit 0
