@@ -17,6 +17,18 @@ if [[ ("$UID" != 0) && ("$1" != "ip") && ("$1" != "-ip") && \
   exit 1
 fi
 
+function detect_machine_type() {
+  unameOut="$(uname -s)"
+  case "${unameOut}" in
+    Linux*)     machine=Linux;;
+    Darwin*)    machine=Mac;;
+    CYGWIN*)    machine=Cygwin;;
+    MINGW*)     machine=MinGw;;
+    *)          machine="UNKNOWN"
+  esac
+  echo "$machine"
+}
+
 function check_requirements() {
   if [[ $(which openvpn) == "" ]]; then
     echo "[!] Error: openvpn is not installed. Install \`openvpn\` package to continue."
@@ -46,9 +58,9 @@ function check_requirements() {
     exit 1
   fi
 
-  if [[ ! -x "/etc/openvpn/update-resolv-conf" ]]; then
-    echo "[!] Error: openvpn-resolv-conf is not installed."
-    read -p "Would you like protonvpn-cli to install openvpn-resolv-conf? (y/n): " "user_confirm"
+  if [[ ( $(detect_machine_type) != "Mac" ) && (! -x "/etc/openvpn/update-resolv-conf") ]]; then
+    echo "[!] Error: update-resolv-conf is not installed."
+    read -p "Would you like protonvpn-cli to install update-resolv-conf? (y/n): " "user_confirm"
     if [[ "$user_confirm" == "y" ]]; then
       install_openvpn_update_resolv_conf
     else
@@ -79,7 +91,7 @@ function install_openvpn_update_resolv_conf() {
     echo "[!] Error: installation requires root access."
     exit 1
   fi
-  echo "[*] Installing openvpn-update-resolv-conf"
+  echo "[*] Installing update-resolv-conf"
   mkdir -p "/etc/openvpn/"
   file_sha512sum="81cf5ed20ec2a2f47f970bb0185fffb3e719181240f2ca3187dbee1f4d102ce63ab048ffee9daa6b68c96ac59d1d86ad4de2b1cfaf77f1b1f1918d143e96a588"
   wget "https://raw.githubusercontent.com/ProtonVPN/scripts/master/update-resolv-conf.sh" -O "/etc/openvpn/update-resolv-conf"
@@ -87,7 +99,7 @@ function install_openvpn_update_resolv_conf() {
     chmod +x "/etc/openvpn/update-resolv-conf"
     echo "[*] Done."
   else
-    echo "[!] Error installing openvpn-update-resolv-conf"
+    echo "[!] Error installing update-resolv-conf"
     exit 1
   fi
 }
@@ -169,18 +181,6 @@ function init_cli() {
 
 }
 
-function detect_machine_type() {
-  unameOut="$(uname -s)"
-  case "${unameOut}" in
-    Linux*)     machine=Linux;;
-    Darwin*)    machine=Mac;;
-    CYGWIN*)    machine=Cygwin;;
-    MINGW*)     machine=MinGw;;
-    *)          machine="UNKNOWN"
-  esac
-  echo "$machine"
-}
-
 function manage_ipv6() {
   # ProtonVPN support for IPv6 coming soon.
   errors_counter=0
@@ -241,9 +241,8 @@ function manage_ipv6() {
     rm -f "$(get_protonvpn_cli_home)/.ipv6_address"
   fi
 
-
   if [[ ("$1" == "enable") && ( ! -f "$(get_protonvpn_cli_home)/.ipv6_services" ) && ( $(detect_machine_type) == "Mac" ) ]]; then
-    echo "[!] This is an error in enabling ipv6 on the machine. Please enable it manually."
+    echo "[!] This is an error in enabling IPv6 on the machine. Please enable it manually."
   fi
 
   # Restore IPv6 in macOS.
@@ -262,12 +261,12 @@ function manage_ipv6() {
   fi
 
   if [[ $errors_counter != 0 ]]; then
-    echo "[!] There are issues in managing ipv6 in the system. Please test the system for the root cause."
-    echo "Not able to manage ipv6 by protonvpn-cli might cause issues in leaking the system's ipv6 address."
+    echo "[!] There are issues in managing IPv6 in the system. Please test the system for the root cause."
+    echo "Not being able to manage IPv6 by protonvpn-cli might cause issues in leaking the system's IPv6 address."
   fi
 }
 
-function modify_dns_resolvconf() {
+function modify_dns() {
 
   if [[ ("$1" == "backup_resolvconf") &&  ( $(detect_machine_type) != "Mac" ) ]]; then
     cp "/etc/resolv.conf" "/etc/resolv.conf.protonvpn_backup" # backing-up current resolv.conf
@@ -279,9 +278,9 @@ function modify_dns_resolvconf() {
 
   if [[ ("$1" == "to_protonvpn_dns") &&  ( $(detect_machine_type) != "Mac") ]]; then
     if [[ $(cat "$(get_protonvpn_cli_home)/protonvpn_tier") == "0" ]]; then
-      dns_server="10.8.0.1" # free tier dns
+      dns_server="10.8.0.1" # Free tier DNS.
     else
-      dns_server="10.8.8.1" # paid tier dns
+      dns_server="10.8.8.1" # Paid tier DNS.
     fi
     echo -e "# ProtonVPN DNS - protonvpn-cli\nnameserver $dns_server" > "/etc/resolv.conf"
   fi
@@ -319,7 +318,7 @@ function openvpn_disconnect() {
       pkill -f openvpn
       sleep 0.50
       if [[ $(is_openvpn_currently_running) == false ]]; then
-        modify_dns_resolvconf revert_to_backup # Reverting to original resolv.conf
+        modify_dns revert_to_backup # Reverting to original resolv.conf
         manage_ipv6 enable # Enabling IPv6 on machine.
         if [[ "$1" != "quiet" ]]; then
           echo "[#] Disconnected."
@@ -349,13 +348,19 @@ function openvpn_connect() {
     exit 1
   fi
 
-  modify_dns_resolvconf backup_resolvconf # backuping-up current resolv.conf
+  modify_dns backup_resolvconf # Backuping-up current resolv.conf
   manage_ipv6 disable # Disabling IPv6 on machine.
 
   config_id=$1
   selected_protocol=$2
   if [[ $selected_protocol == "" ]]; then
     selected_protocol="udp"  # Default protocol
+  fi
+
+  if [[ $(detect_machine_type) != "Mac" ]]; then
+    platform="linux"
+  else
+    platform="macos"
   fi
 
   current_ip="$(check_ip)"
@@ -367,12 +372,12 @@ function openvpn_connect() {
 
     wget --header 'x-pm-appversion: Other' --header 'x-pm-apiversion: 3' \
       --header 'Accept: application/vnd.protonmail.v1+json' \
-      --timeout 10 -q -O /dev/stdout "https://api.protonmail.ch/vpn/config?Platform=linux&ServerID=$config_id&Protocol=$selected_protocol" \
+      --timeout 10 -q -O /dev/stdout "https://api.protonmail.ch/vpn/config?Platform=$platform&ServerID=$config_id&Protocol=$selected_protocol" \
       | openvpn --daemon --config "/dev/stdin" --auth-user-pass "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials" --auth-nocache --auth-retry nointeract --verb 4 --log-append "$tempfile" &> "$tempfile"
   else
     wget --header 'x-pm-appversion: Other' --header 'x-pm-apiversion: 3' \
       --header 'Accept: application/vnd.protonmail.v1+json' \
-      --timeout 10 -q -O /dev/stdout "https://api.protonmail.ch/vpn/config?Platform=linux&ServerID=$config_id&Protocol=$selected_protocol" \
+      --timeout 10 -q -O /dev/stdout "https://api.protonmail.ch/vpn/config?Platform=$platform&ServerID=$config_id&Protocol=$selected_protocol" \
       | openvpn --daemon --config "/dev/stdin" --auth-user-pass "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials" --auth-nocache --auth-retry nointeract
   fi
   echo "Connecting..."
@@ -383,7 +388,7 @@ function openvpn_connect() {
     sleep 5
     new_ip="$(check_ip)"
     if [[ ("$current_ip" != "$new_ip") && ("$new_ip" != "Error.") ]]; then
-      modify_dns_resolvconf to_protonvpn_dns # Use protonvpn DNS server
+      modify_dns to_protonvpn_dns # Use protonvpn DNS server
       echo "[$] Connected!"
       echo "[#] New IP: $new_ip"
       exit 0
