@@ -52,9 +52,10 @@ function check_requirements() {
     exit 1
   fi
 
-  if [[ $(which sha512sum) == "" ]]; then
+  sha512sum_func
+  if [[ "$sha512sum_tool" == "" ]]; then
     echo "[!] Error: sha512sum is not installed. Install \`sha512sum\` package to continue."
-    echo "Also check: https://github.com/ProtonVPN/protonvpn-cli/issues/45 for reference."
+    #echo "Also check: https://github.com/ProtonVPN/protonvpn-cli/issues/45 for reference."
     exit 1
   fi
 
@@ -82,6 +83,14 @@ function get_home() {
   echo "$USER_HOME"
 }
 
+function sha512sum_func() {
+  if [[ $(which sha512sum) != "" ]]; then
+    export sha512sum_tool="$(which sha512sum)"
+  elif [[ $(which shasum) != "" ]]; then
+    export sha512sum_tool="$(which shasum) -a 512 "
+  fi
+}
+
 function get_protonvpn_cli_home() {
   echo "$(get_home)/.protonvpn-cli"
 }
@@ -95,7 +104,7 @@ function install_openvpn_update_resolv_conf() {
   mkdir -p "/etc/openvpn/"
   file_sha512sum="81cf5ed20ec2a2f47f970bb0185fffb3e719181240f2ca3187dbee1f4d102ce63ab048ffee9daa6b68c96ac59d1d86ad4de2b1cfaf77f1b1f1918d143e96a588"
   wget "https://raw.githubusercontent.com/ProtonVPN/scripts/master/update-resolv-conf.sh" -O "/etc/openvpn/update-resolv-conf"
-  if [[ ($? == 0) && ($(sha512sum "/etc/openvpn/update-resolv-conf" | cut -d " " -f1) == "$file_sha512sum")  ]]; then
+  if [[ ($? == 0) && ($($sha512sum_tool "/etc/openvpn/update-resolv-conf" | cut -d " " -f1) == "$file_sha512sum")  ]]; then
     chmod +x "/etc/openvpn/update-resolv-conf"
     echo "[*] Done."
   else
@@ -103,7 +112,6 @@ function install_openvpn_update_resolv_conf() {
     exit 1
   fi
 }
-
 
 function check_ip() {
   counter=0
@@ -116,8 +124,8 @@ function check_ip() {
     if [[ $counter -lt 3 ]]; then
       ip=$(wget --header 'x-pm-appversion: Other' --header 'x-pm-apiversion: 3' \
         --header 'Accept: application/vnd.protonmail.v1+json' \
-        --timeout 6 -q -O /dev/stdout 'https://api.protonmail.ch/vpn/location' \
-        | awk -F'"' '$2 == "IP" { print $4 }')
+        --timeout 3 -q -O /dev/stdout 'https://api.protonmail.ch/vpn/location' \
+        | python -c 'import json; _ = open("/dev/stdin", "r").read(); print(json.loads(_)["IP"])' 2> /dev/null)
       counter=$((counter+1))
     else
       ip="Error."
@@ -136,6 +144,18 @@ function cli_debug() {
   fi
 }
 
+function create_vi_bindings() {
+    echo -en "
+bindkey menubox \\j ITEM_NEXT
+bindkey menubox \\k ITEM_PREV
+bindkey menubox \\q ESC
+bindkey menubox \\g PAGE_FIRST
+bindkey menubox \\G PAGE_LAST
+bindkey menubox \\l FIELD_NEXT
+bindkey menubox \\h FIELD_NEXT
+" > "$(get_protonvpn_cli_home)/dialogrc"
+}
+
 function init_cli() {
   if [[ -f "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials" ]]; then
     echo -n "[!] user profile for protonvpn-cli has already been initialized. Would you like to start over with a fresh configuration? [Y/N]: "
@@ -148,6 +168,8 @@ function init_cli() {
 
   rm -rf "$(get_protonvpn_cli_home)/"  # Previous profile will be removed/overwritten, if any.
   mkdir -p "$(get_protonvpn_cli_home)/"
+
+  create_vi_bindings
 
   read -p "Enter OpenVPN username: " "openvpn_username"
   read -s -p "Enter OpenVPN password: " "openvpn_password"
@@ -277,8 +299,9 @@ function modify_dns() {
   #fi
 
   if [[ ("$1" == "to_protonvpn_dns") &&  ( $(detect_machine_type) != "Mac") ]]; then
-    if [[ $(cat "$(get_protonvpn_cli_home)/protonvpn_tier") == "0" ]]; then
-      dns_server="10.8.0.1" # Free tier DNS.
+
+    if [[ $(get_vpn_tier "$2") == "0" ]]; then
+      dns_server="10.8.0.1" # free tier dns
     else
       dns_server="10.8.8.1" # Paid tier DNS.
     fi
@@ -314,12 +337,17 @@ function openvpn_disconnect() {
     echo "Disconnecting..."
   fi
 
+  if [[ $(is_openvpn_currently_running) == true ]]; then
+    manage_ipv6 enable # Enabling IPv6 on machine.
+  fi
+
   while [[ $counter -lt $max_checks ]]; do
       pkill -f openvpn
       sleep 0.50
       if [[ $(is_openvpn_currently_running) == false ]]; then
-        modify_dns revert_to_backup # Reverting to original resolv.conf
-        manage_ipv6 enable # Enabling IPv6 on machine.
+        modify_dns_resolvconf revert_to_backup # Reverting to original resolv.conf
+        rm -f "$(get_protonvpn_cli_home)/.response_cache" 2> /dev/null  # Removing cache
+
         if [[ "$1" != "quiet" ]]; then
           echo "[#] Disconnected."
           echo "[#] Current IP: $(check_ip)"
@@ -357,12 +385,6 @@ function openvpn_connect() {
     selected_protocol="udp"  # Default protocol
   fi
 
-  if [[ $(detect_machine_type) != "Mac" ]]; then
-    platform="linux"
-  else
-    platform="macos"
-  fi
-
   current_ip="$(check_ip)"
   if [[ "$PROTONVPN_CLI_LOG" == "true" ]]; then  # PROTONVPN_CLI_LOG is retrieved from env.
     tempfile=$(mktemp -t protonvpn-cli-logs-XXXXXXXX)
@@ -372,12 +394,12 @@ function openvpn_connect() {
 
     wget --header 'x-pm-appversion: Other' --header 'x-pm-apiversion: 3' \
       --header 'Accept: application/vnd.protonmail.v1+json' \
-      --timeout 10 -q -O /dev/stdout "https://api.protonmail.ch/vpn/config?Platform=$platform&ServerID=$config_id&Protocol=$selected_protocol" \
+      --timeout 10 -q -O /dev/stdout "https://api.protonmail.ch/vpn/config?Platform=linux&LogicalID=$config_id&Protocol=$selected_protocol" \
       | openvpn --daemon --config "/dev/stdin" --auth-user-pass "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials" --auth-nocache --auth-retry nointeract --verb 4 --log-append "$tempfile" &> "$tempfile"
   else
     wget --header 'x-pm-appversion: Other' --header 'x-pm-apiversion: 3' \
       --header 'Accept: application/vnd.protonmail.v1+json' \
-      --timeout 10 -q -O /dev/stdout "https://api.protonmail.ch/vpn/config?Platform=$platform&ServerID=$config_id&Protocol=$selected_protocol" \
+      --timeout 10 -q -O /dev/stdout "https://api.protonmail.ch/vpn/config?Platform=linux&LogicalID=$config_id&Protocol=$selected_protocol" \
       | openvpn --daemon --config "/dev/stdin" --auth-user-pass "$(get_protonvpn_cli_home)/protonvpn_openvpn_credentials" --auth-nocache --auth-retry nointeract
   fi
   echo "Connecting..."
@@ -388,7 +410,7 @@ function openvpn_connect() {
     sleep 5
     new_ip="$(check_ip)"
     if [[ ("$current_ip" != "$new_ip") && ("$new_ip" != "Error.") ]]; then
-      modify_dns to_protonvpn_dns # Use ProtonVPN DNS server.
+      modify_dns_resolvconf to_protonvpn_dns "$config_id" # Use protonvpn DNS server
       echo "[$] Connected!"
       echo "[#] New IP: $new_ip"
       exit 0
@@ -412,13 +434,13 @@ function update_cli() {
     exit 1
   fi
   echo "[#] Checking for update."
-  current_local_hashsum=$(sha512sum "$cli_path" | cut -d " " -f1)
+  current_local_hashsum=$($sha512sum_tool "$cli_path" | cut -d " " -f1)
   remote_=$(wget --timeout 6 -q -O /dev/stdout 'https://raw.githubusercontent.com/ProtonVPN/protonvpn-cli/master/protonvpn-cli.sh')
   if [[ $? != 0 ]]; then
     echo "[!] Error: There is an error updating protonvpn-cli."
     exit 1
   fi
-  remote_hashsum=$( echo "$remote_" | sha512sum | cut -d ' ' -f1)
+  remote_hashsum=$( echo "$remote_" | $sha512sum_tool | cut -d ' ' -f1)
 
   if [[ "$current_local_hashsum" == "$remote_hashsum" ]]; then
     echo "[*] protonvpn-cli is up-to-date!"
@@ -599,6 +621,11 @@ function connection_to_vpn_via_dialog_menu() {
     ARRAY+=($data)
   done
 
+  # Set DIALOGRC to a custom file including VI key binding
+  if [[ -f "$(get_protonvpn_cli_home)/dialogrc" ]]; then
+      export DIALOGRC="$(get_protonvpn_cli_home)/dialogrc"
+  fi
+
   config_id=$(dialog --clear  --ascii-lines --output-fd 1 --title "ProtonVPN-CLI" --column-separator "@" \
     --menu "ID - Name - Country - Load - EntryIP - ExitIP - Features" 35 300 "$((${#ARRAY[@]}))" "${ARRAY[@]}" )
   clear
@@ -630,7 +657,7 @@ function connection_to_vpn_via_dialog_menu() {
 function get_fastest_vpn_connection_id() {
   response_output=$(wget --header 'x-pm-appversion: Other' --header 'x-pm-apiversion: 3' \
     --header 'Accept: application/vnd.protonmail.v1+json' \
-    --timeout 20 -q -O /dev/stdout "https://api.protonmail.ch/vpn/logicals")
+    --timeout 20 -q -O /dev/stdout "https://api.protonmail.ch/vpn/logicals" | tee $(get_protonvpn_cli_home)/.response_cache)
   tier=$(cat "$(get_protonvpn_cli_home)/protonvpn_tier")
   output=`python <<END
 import json, math, random
@@ -658,7 +685,7 @@ for _ in json_parsed_response["LogicalServers"]:
 candidates_2_size = float(len(candidates_1)) / 100.00 * 5.00
 candidates_2 = sorted(candidates_1, key=lambda l: l["Score"])[:int(math.ceil(candidates_2_size))]
 random_candidate = random.choice(candidates_2)
-vpn_connection_id = random.choice(random_candidate["Servers"])["ID"]
+vpn_connection_id = random_candidate["ID"]
 print(vpn_connection_id)
 
 END`
@@ -669,7 +696,7 @@ END`
 function get_random_vpn_connection_id() {
   response_output=$(wget --header 'x-pm-appversion: Other' --header 'x-pm-apiversion: 3' \
     --header 'Accept: application/vnd.protonmail.v1+json' \
-    --timeout 20 -q -O /dev/stdout "https://api.protonmail.ch/vpn/logicals")
+    --timeout 20 -q -O /dev/stdout "https://api.protonmail.ch/vpn/logicals" | tee $(get_protonvpn_cli_home)/.response_cache)
   tier=$(cat "$(get_protonvpn_cli_home)/protonvpn_tier")
   output=`python <<END
 import json, random
@@ -678,7 +705,22 @@ output = []
 for _ in json_parsed_response["LogicalServers"]:
     if (_["Tier"] <= int("""$tier""")):
         output.append(_)
-print(random.choice(output)["Servers"][0]["ID"])
+print(random.choice(output)["ID"])
+END`
+
+  echo "$output"
+}
+
+function get_vpn_tier() {
+  response_cache_path="$(get_protonvpn_cli_home)/.response_cache"
+  output=`python <<END
+import json
+response_cache_fileread = open("""$response_cache_path""", "r").read()
+json_parsed_response = json.loads(response_cache_fileread)
+for _ in json_parsed_response["LogicalServers"]:
+    if (_["ID"] == """$1"""):
+        print(_["Tier"])
+        break
 END`
 
   echo "$output"
@@ -687,7 +729,7 @@ END`
 function get_vpn_config_details() {
   response_output=$(wget --header 'x-pm-appversion: Other' --header 'x-pm-apiversion: 3' \
     --header 'Accept: application/vnd.protonmail.v1+json' \
-    --timeout 20 -q -O /dev/stdout "https://api.protonmail.ch/vpn/logicals")
+    --timeout 20 -q -O /dev/stdout "https://api.protonmail.ch/vpn/logicals" | tee $(get_protonvpn_cli_home)/.response_cache)
   tier=$(cat "$(get_protonvpn_cli_home)/protonvpn_tier")
   output=`python <<END
 import json, random
@@ -709,7 +751,7 @@ for _ in output:
     else:
         server_features_output = ",".join(server_features)
 
-    o = "{} {}@{}@{}@{}@{}@{}".format(_["Servers"][0]["ID"], _["Name"], \
+    o = "{} {}@{}@{}@{}@{}@{}".format(_["ID"], _["Name"], \
       _["EntryCountry"], _["Load"], _["Servers"][0]["EntryIP"], _["Servers"][0]["ExitIP"], \
       str(server_features_output))
     print(o)
