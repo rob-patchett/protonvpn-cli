@@ -289,36 +289,52 @@ function manage_ipv6() {
 }
 
 function modify_dns() {
-
-  if [[ ("$1" == "backup_resolvconf") &&  ( $(detect_machine_type) != "Mac" ) ]]; then
-    cp "/etc/resolv.conf" "/etc/resolv.conf.protonvpn_backup" # backing-up current resolv.conf
+  # Backup DNS entries
+  if [[ ("$1" == "backup")]]; then
+    if [[  ( $(detect_machine_type) == "Mac" ) ]]; then
+      networksetup listallnetworkservices | tail +2 | while read interface; do
+        networksetup -getdnsservers "$interface" > "$(get_protonvpn_cli_home)/$interface.dns_backup"
+      done
+    else # non-Mac
+      cp "/etc/resolv.conf" "/etc/resolv.conf.protonvpn_backup"
+    fi
   fi
 
-  #if [[ ("$1" == "backup_resolvconf") &&  ( $(detect_machine_type) == "Mac" ) ]]; then
-  #  ToDo: Support for macOS
-  #fi
-
-  if [[ ("$1" == "to_protonvpn_dns") &&  ( $(detect_machine_type) != "Mac") ]]; then
+  # Apply ProtonVPN DNS
+  if [[ ("$1" == "to_protonvpn_dns") ]]; then
 
     if [[ $(get_vpn_tier "$2") == "0" ]]; then
       dns_server="10.8.0.1" # free tier dns
     else
-      dns_server="10.8.8.1" # Paid tier DNS.
+      dns_server="10.8.8.1" # paid tier dns
     fi
-    echo -e "# ProtonVPN DNS - protonvpn-cli\nnameserver $dns_server" > "/etc/resolv.conf"
+
+    if [[ ( $(detect_machine_type) == "Mac" ) ]]; then
+      networksetup listallnetworkservices | tail +2 | while read interface; do
+        networksetup -setdnsservers "$interface" $dns_server
+      done
+    else # non-Mac
+      echo -e "# ProtonVPN DNS - protonvpn-cli\nnameserver $dns_server" > "/etc/resolv.conf"
+    fi
   fi
 
-  #if [[ ("$1" == "to_protonvpn_dns") &&  ( $(detect_machine_type) == "Mac" ) ]]; then
-  #  ToDo: Support for macOS
-  #fi
-
-  if [[ "$1" == "revert_to_backup" &&  ( $(detect_machine_type) != "Mac" )  ]]; then
-    cp "/etc/resolv.conf.protonvpn_backup" "/etc/resolv.conf"
+  # Restore backed-up DNS entries
+  if [[ "$1" == "revert_to_backup" ]]; then
+    if [[  ( $(detect_machine_type) == "Mac" )  ]]; then
+      networksetup listallnetworkservices | tail +2 | while read interface; do
+        file="$(get_protonvpn_cli_home)/$interface.dns_backup"
+        if [[ -f "$file" ]]; then
+          if grep -q "There aren't any DNS Servers set" "$file"; then
+            networksetup -setdnsservers "$interface" empty
+          else
+            networksetup -setdnsservers "$interface" $(< $file)
+          fi
+        fi
+      done
+    else # non-Mac
+      cp "/etc/resolv.conf.protonvpn_backup" "/etc/resolv.conf"
+    fi
   fi
-
-  #if [[ ("$1" == "revert_to_backup") &&  ( $(detect_machine_type) == "Mac" ) ]]; then
-  #  ToDo: Support for macOS
-  #fi
 }
 
 function is_openvpn_currently_running() {
@@ -345,7 +361,7 @@ function openvpn_disconnect() {
       pkill -f openvpn
       sleep 0.50
       if [[ $(is_openvpn_currently_running) == false ]]; then
-        modify_dns_resolvconf revert_to_backup # Reverting to original resolv.conf
+        modify_dns revert_to_backup # Reverting to original DNS entries
         rm -f "$(get_protonvpn_cli_home)/.response_cache" 2> /dev/null  # Removing cache
 
         if [[ "$1" != "quiet" ]]; then
@@ -376,7 +392,7 @@ function openvpn_connect() {
     exit 1
   fi
 
-  modify_dns backup_resolvconf # Backuping-up current resolv.conf
+  modify_dns backup # Backing-up current DNS entries
   manage_ipv6 disable # Disabling IPv6 on machine.
 
   config_id=$1
@@ -410,7 +426,7 @@ function openvpn_connect() {
     sleep 5
     new_ip="$(check_ip)"
     if [[ ("$current_ip" != "$new_ip") && ("$new_ip" != "Error.") ]]; then
-      modify_dns_resolvconf to_protonvpn_dns "$config_id" # Use protonvpn DNS server
+      modify_dns to_protonvpn_dns "$config_id" # Use protonvpn DNS server
       echo "[$] Connected!"
       echo "[#] New IP: $new_ip"
       exit 0
